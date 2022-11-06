@@ -2,66 +2,72 @@
 
 import rospy
 from sensor_msgs.msg import LaserScan
-from visualization_msgs.msg import Marker
-from geometry_msgs.msg import Point, Point32
-from geometry_msgs.msg import Polygon
-from std_msgs.msg import ColorRGBA
-from laser_line_extraction.msg import LineSegmentList
+from std_msgs.msg import Float32MultiArray
 import numpy as np
-import matplotlib.pyplot as plt 
-import matplotlib.animation as animation
 
-FRAME_ID = 'lidar_frame'
 topic = '/LiDAR/LD06'
 
-#pub = rospy.Publisher('wall', Point32, queue_size =1)
-pubdata = rospy.Publisher('data',Polygon,queue_size=1)
+pubdata = rospy.Publisher('data',Float32MultiArray,queue_size=1)
+
+## laser angle
+left = 1/2 * np.pi
+right = 3/2 * np.pi
+front = 0.0000001
+back = np.pi
+direc = {'left':left, 'back':back, 'right':right, 'front':front}
+
+cone_angle = np.pi/8
 
 
-
-def n(val):
-	return ((val+np.pi)%(2*np.pi)-np.pi)
+def n(val, f=True):
+	if f:
+		return ((val+np.pi)%(2*np.pi)-np.pi)
+	else:
+		return val
 
 def callback(msg):
 	distances = np.array(msg.ranges)	
 	if not len(distances):
 		return	
-	thetas = -2*np.pi*np.array(range(len(distances)))/(len(distances)-1)
+	thetas = 2*np.pi*np.array(range(len(distances)))/(len(distances)-1)
 	# Remove nans	
 	thetas = thetas[~np.isnan(distances)]
 	distances = distances[~np.isnan(distances)]
 	# Convert to cartesian
 	x = distances * np.cos(thetas)
 	y = distances * np.sin(thetas)
-	# filter angle range
-	cond = np.logical_and(-7*np.pi/4 <thetas, thetas<-5*np.pi/4 )
-	x = x[cond]
-	y = y[cond]
-	# Regression
-	X = np.vstack((x,np.ones_like(x))).T
-	theta=np.linalg.inv(X.T.dot(X)).dot(X.T).dot(y)
-	m, inter = theta
-	p = Point32()
-	p.x = np.arctan(m)
-	p.y = inter
-	p.z = 0.0
-	#pub.publish(p)
-	pol = Polygon()
-	pol.points.append(p)
-	for i in range(len(x)):
-		p = Point32()
-		p.x = x[i]
-		p.y = y[i]
-		p.z = 0.0
-		pol.points.append(p)
-	pubdata.publish(pol)
-	print(pol.points[0].x,pol.points[0].y)
+	
+	p = Float32MultiArray()
+	p.data = [0,0,0,0]
+	f = False
+	for i, (k,v) in enumerate(direc.items()):	
+		# filter angle range on the left
+		if k == 'front':
+			thetas = n(thetas)
+			cond = np.logical_and(n(v-cone_angle) <thetas, thetas<n(v+cone_angle))
+			xc = x[cond]
+			yc = y[cond]
+		else:
+			cond = np.logical_and(v-cone_angle <thetas, thetas<v+cone_angle)
+			xc = x[cond]
+			yc = y[cond]
+			
+		# Regression
+		X = np.vstack((xc,np.ones_like(xc))).T
+		w = np.linalg.inv(X.T.dot(X)).dot(X.T).dot(yc)
+		if k == 'front' or k == 'back':
+			p.data[i] = -w[1]/(w[0]+1e-6)
+		else:
+			p.data[i] = w[1]  ### distance to wall
+	
+	### Left,Back,Right,Front ###
+	pubdata.publish(p)
+	print(p.data)
 
 	
 def main():
-	rospy.init_node('walls')
+	rospy.init_node('wall_detector')
 	sub = rospy.Subscriber(topic, LaserScan, callback, queue_size=1)
-	#plt.show(block=True)
 	rospy.spin()
 
 if __name__ == '__main__':
